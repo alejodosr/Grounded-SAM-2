@@ -4,6 +4,7 @@
 # Copyright (c) 2023 IDEA. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
+import inspect
 
 import torch
 import torch.nn.functional as F
@@ -26,7 +27,21 @@ class BertModelWarper(nn.Module):
 
         self.get_extended_attention_mask = bert_model.get_extended_attention_mask
         self.invert_attention_mask = bert_model.invert_attention_mask
-        self.get_head_mask = bert_model.get_head_mask
+        # FIX for transformers >= 4.36
+        if hasattr(bert_model, 'get_head_mask'):
+            self.get_head_mask = bert_model.get_head_mask
+        else:
+            # Implement get_head_mask directly for newer transformers
+            def _get_head_mask(head_mask, num_hidden_layers, is_attention_chunked=False):
+                if head_mask is not None:
+                    head_mask = self._convert_head_mask_to_5d(head_mask, num_hidden_layers)
+                    if is_attention_chunked:
+                        head_mask = head_mask.unsqueeze(-1)
+                else:
+                    head_mask = [None] * num_hidden_layers
+                return head_mask
+
+            self.get_head_mask = _get_head_mask
 
     def forward(
         self,
@@ -106,9 +121,15 @@ class BertModelWarper(nn.Module):
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
-            attention_mask, input_shape, device
-        )
+        sig = inspect.signature(self.get_extended_attention_mask)
+        if 'device' in sig.parameters:
+            extended_attention_mask = self.get_extended_attention_mask(
+                attention_mask, input_shape, device
+            )
+        else:
+            extended_attention_mask = self.get_extended_attention_mask(
+                attention_mask, input_shape
+            )
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
